@@ -1,0 +1,13 @@
+{
+  "name": "mouse-light-overlay",
+  "version": "1.0.0",
+  "description": "Transparent desktop overlay that draws a bright circle around the mouse cursor.",
+  "main": "main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}
