@@ -16,6 +16,9 @@
 
   const webglRenderer = triangles.getWebGL();
   const sourceCanvas = webglRenderer ? webglRenderer.element : null;
+  const TARGET_FPS = 60;
+  const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
+  let maskController = null;
 
   const screenCanvas = document.createElement('canvas');
   const screenContext = screenCanvas.getContext('2d');
@@ -65,9 +68,15 @@
     triangles.setMousePosition(event.clientX, event.clientY);
   }
 
-  function animate() {
-    triangles.tick();
-    drawToScreenCanvas();
+  let lastFrameAt = 0;
+  function animate(timestamp) {
+    if (timestamp - lastFrameAt >= FRAME_INTERVAL_MS) {
+      // Keep WebGL update and 2D composite in the exact same frame budget.
+      triangles.tick();
+      drawToScreenCanvas();
+      lastFrameAt = timestamp - ((timestamp - lastFrameAt) % FRAME_INTERVAL_MS);
+    }
+
     window.requestAnimationFrame(animate);
   }
 
@@ -75,7 +84,24 @@
   container.addEventListener('mousemove', onMouseMove);
 
   resizeOverlayCanvas();
-  animate();
+
+  if (typeof window.startScreenColorMaskLoop === 'function') {
+    window.startScreenColorMaskLoop(screenCanvas)
+      .then((controller) => {
+        maskController = controller;
+      })
+      .catch((error) => {
+        console.error('Failed to start screen color mask loop:', error);
+      });
+  }
+
+  window.addEventListener('beforeunload', () => {
+    if (maskController && typeof maskController.stop === 'function') {
+      maskController.stop();
+    }
+  });
+
+  window.requestAnimationFrame(animate);
 
   window.trianglesRuntime = triangles;
   window.trianglesWebGL = triangles.getWebGL();
