@@ -1,52 +1,48 @@
 (() => {
   const TARGET_FPS = 15;
   const FRAME_INTERVAL_MS = Math.round(1000 / TARGET_FPS);
-  const BINS_PER_CHANNEL = 32;
-  const BIN_COUNT = BINS_PER_CHANNEL * BINS_PER_CHANNEL * BINS_PER_CHANNEL;
-  const COLOR_TOLERANCE = 24;
 
-  function clampByte(value) {
-    return Math.max(0, Math.min(255, value));
-  }
+  function getTopColors(histogram, limit) {
+    return Array.from(histogram.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([key, count]) => {
+        const [r, g, b] = key.split(',').map(Number);
 
-  function binToRgb(bin) {
-    const rBin = bin % BINS_PER_CHANNEL;
-    const gBin = Math.floor(bin / BINS_PER_CHANNEL) % BINS_PER_CHANNEL;
-    const bBin = Math.floor(bin / (BINS_PER_CHANNEL * BINS_PER_CHANNEL));
-
-    const step = 256 / BINS_PER_CHANNEL;
-    const r = clampByte(Math.floor((rBin + 0.5) * step));
-    const g = clampByte(Math.floor((gBin + 0.5) * step));
-    const b = clampByte(Math.floor((bBin + 0.5) * step));
-
-    return { r, g, b };
+        return {
+          rgb: { r, g, b },
+          count,
+        };
+      });
   }
 
   function createDominantColorHistogram(rgba) {
-    const histogram = new Uint32Array(BIN_COUNT);
-    let bestBin = 0;
+    const histogram = new Map();
+    let bestKey = '0,0,0';
     let bestCount = 0;
 
     for (let i = 0; i < rgba.length; i += 4) {
       const r = rgba[i];
       const g = rgba[i + 1];
       const b = rgba[i + 2];
+      const key = `${r},${g},${b}`;
+      const count = (histogram.get(key) || 0) + 1;
 
-      const rq = Math.min(BINS_PER_CHANNEL - 1, Math.floor((r * BINS_PER_CHANNEL) / 256));
-      const gq = Math.min(BINS_PER_CHANNEL - 1, Math.floor((g * BINS_PER_CHANNEL) / 256));
-      const bq = Math.min(BINS_PER_CHANNEL - 1, Math.floor((b * BINS_PER_CHANNEL) / 256));
-
-      const bin = rq + gq * BINS_PER_CHANNEL + bq * BINS_PER_CHANNEL * BINS_PER_CHANNEL;
-      const count = ++histogram[bin];
+      histogram.set(key, count);
       if (count > bestCount) {
         bestCount = count;
-        bestBin = bin;
+        bestKey = key;
       }
     }
 
+    const [r, g, b] = bestKey.split(',').map(Number);
+    const topColors = getTopColors(histogram, 5);
+
     return {
-      dominant: binToRgb(bestBin),
+      dominant: { r, g, b },
       count: bestCount,
+      uniqueColors: histogram.size,
+      topColors,
     };
   }
 
@@ -54,11 +50,10 @@
     const maskRgba = new Uint8ClampedArray(sourceRgba.length);
 
     for (let i = 0; i < sourceRgba.length; i += 4) {
-      const dr = Math.abs(sourceRgba[i] - dominant.r);
-      const dg = Math.abs(sourceRgba[i + 1] - dominant.g);
-      const db = Math.abs(sourceRgba[i + 2] - dominant.b);
-
-      const isMatch = dr <= COLOR_TOLERANCE && dg <= COLOR_TOLERANCE && db <= COLOR_TOLERANCE;
+      const isMatch =
+        sourceRgba[i] === dominant.r &&
+        sourceRgba[i + 1] === dominant.g &&
+        sourceRgba[i + 2] === dominant.b;
       const alpha = isMatch ? 255 : 0;
 
       maskRgba[i] = 255;
@@ -70,18 +65,20 @@
     return new ImageData(maskRgba, width, height);
   }
 
-  function applyMaskFrame(targetCanvas) {
-    if (!targetCanvas) {
-      throw new Error('targetCanvas is required.');
+  function applyMaskFrame(sourceCanvas, targetCanvas, maskOutputCanvas) {
+    if (!sourceCanvas) {
+      throw new Error('sourceCanvas is required.');
     }
 
-    const targetCtx = targetCanvas.getContext('2d');
+    const actualTargetCanvas = targetCanvas || sourceCanvas;
+
+    const targetCtx = actualTargetCanvas.getContext('2d');
     if (!targetCtx) {
       throw new Error('2D context is required on targetCanvas.');
     }
 
-    const width = Math.max(1, targetCanvas.width || targetCanvas.clientWidth || 1);
-    const height = Math.max(1, targetCanvas.height || targetCanvas.clientHeight || 1);
+    const width = Math.max(1, sourceCanvas.width || sourceCanvas.clientWidth || 1);
+    const height = Math.max(1, sourceCanvas.height || sourceCanvas.clientHeight || 1);
 
     const sampleCanvas = document.createElement('canvas');
     sampleCanvas.width = width;
@@ -92,7 +89,7 @@
       throw new Error('Failed to create sample 2D context.');
     }
 
-    sampleCtx.drawImage(targetCanvas, 0, 0, width, height);
+    sampleCtx.drawImage(sourceCanvas, 0, 0, width, height);
     const frame = sampleCtx.getImageData(0, 0, width, height);
 
     const dominantInfo = createDominantColorHistogram(frame.data);
@@ -108,18 +105,44 @@
 
     maskCtx.putImageData(mask, 0, 0);
 
+    if (maskOutputCanvas) {
+      const maskOutputCtx = maskOutputCanvas.getContext('2d');
+      if (!maskOutputCtx) {
+        throw new Error('2D context is required on maskOutputCanvas.');
+      }
+
+      if (maskOutputCanvas.width !== width) {
+        maskOutputCanvas.width = width;
+      }
+      if (maskOutputCanvas.height !== height) {
+        maskOutputCanvas.height = height;
+      }
+
+      maskOutputCtx.clearRect(0, 0, width, height);
+      maskOutputCtx.drawImage(maskCanvas, 0, 0, width, height);
+    }
+
     targetCtx.save();
     targetCtx.globalCompositeOperation = 'destination-in';
     targetCtx.drawImage(maskCanvas, 0, 0, width, height);
     targetCtx.restore();
 
-    targetCanvas.__screenMaskInfo = {
+    const maskInfo = {
       timestamp: Date.now(),
       dominant: dominantInfo.dominant,
       count: dominantInfo.count,
+      uniqueColors: dominantInfo.uniqueColors,
+      topColors: dominantInfo.topColors,
     };
 
-    return targetCanvas.__screenMaskInfo;
+    // Keep debug data available regardless of which canvas the runtime reads from.
+    actualTargetCanvas.__screenMaskInfo = maskInfo;
+    sourceCanvas.__screenMaskInfo = maskInfo;
+    if (maskOutputCanvas) {
+      maskOutputCanvas.__screenMaskInfo = maskInfo;
+    }
+
+    return maskInfo;
   }
 
   async function startScreenColorMaskLoop(targetCanvas) {
@@ -145,28 +168,11 @@
     video.srcObject = stream;
     await video.play();
 
-    const sampleCanvas = document.createElement('canvas');
-    const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
-    if (!sampleCtx) {
-      throw new Error('Failed to create sample 2D context.');
-    }
-
-    const maskCanvas = document.createElement('canvas');
-    const maskCtx = maskCanvas.getContext('2d');
-    if (!maskCtx) {
-      throw new Error('Failed to create mask 2D context.');
-    }
-
     let timer = null;
 
     function syncSize() {
       const width = Math.max(1, targetCanvas.width || targetCanvas.clientWidth || 1);
       const height = Math.max(1, targetCanvas.height || targetCanvas.clientHeight || 1);
-
-      sampleCanvas.width = width;
-      sampleCanvas.height = height;
-      maskCanvas.width = width;
-      maskCanvas.height = height;
 
       if (targetCanvas.width !== width) {
         targetCanvas.width = width;
@@ -183,28 +189,12 @@
 
       syncSize();
 
-      const width = sampleCanvas.width;
-      const height = sampleCanvas.height;
+      const width = Math.max(1, targetCanvas.width || targetCanvas.clientWidth || 1);
+      const height = Math.max(1, targetCanvas.height || targetCanvas.clientHeight || 1);
 
-      sampleCtx.drawImage(video, 0, 0, width, height);
-      const frame = sampleCtx.getImageData(0, 0, width, height);
-
-      const dominantInfo = createDominantColorHistogram(frame.data);
-      const mask = buildColorMask(frame.data, width, height, dominantInfo.dominant);
-
-      maskCtx.putImageData(mask, 0, 0);
-
-      // Apply the mask to the target canvas content.
-      targetCtx.save();
-      targetCtx.globalCompositeOperation = 'destination-in';
-      targetCtx.drawImage(maskCanvas, 0, 0, width, height);
-      targetCtx.restore();
-
-      targetCanvas.__screenMaskInfo = {
-        timestamp: Date.now(),
-        dominant: dominantInfo.dominant,
-        count: dominantInfo.count,
-      };
+      targetCtx.clearRect(0, 0, width, height);
+      targetCtx.drawImage(video, 0, 0, width, height);
+      applyMaskFrame(targetCanvas);
     }
 
     timer = window.setInterval(tick, FRAME_INTERVAL_MS);
