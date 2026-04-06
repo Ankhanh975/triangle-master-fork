@@ -40,6 +40,10 @@
 
   const captureCanvas = document.createElement('canvas');
   captureCanvas.style.display = 'none';
+  const histogramSampleCanvas = document.createElement('canvas');
+  const histogramSampleContext = histogramSampleCanvas.getContext('2d', {
+    willReadFrequently: true,
+  });
 
   const screenCanvas = document.createElement('canvas');
   const screenContext = screenCanvas.getContext('2d');
@@ -147,12 +151,61 @@
     context.drawImage(source, 0, 0, width, height);
   }
 
+  function buildHistogramInfoFromCanvas(canvas) {
+    if (!canvas || !histogramSampleContext || canvas.width < 1 || canvas.height < 1) {
+      return null;
+    }
+
+    const sampleWidth = Math.max(1, Math.min(320, canvas.width));
+    const sampleHeight = Math.max(1, Math.min(180, canvas.height));
+    histogramSampleCanvas.width = sampleWidth;
+    histogramSampleCanvas.height = sampleHeight;
+
+    histogramSampleContext.clearRect(0, 0, sampleWidth, sampleHeight);
+    histogramSampleContext.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+
+    const imageData = histogramSampleContext.getImageData(0, 0, sampleWidth, sampleHeight).data;
+    const histogram = new Map();
+
+    for (let i = 0; i < imageData.length; i += 4) {
+      // Quantize channels to stabilize histogram under video compression noise.
+      const r = imageData[i] & 0xf8;
+      const g = imageData[i + 1] & 0xf8;
+      const b = imageData[i + 2] & 0xf8;
+      const key = `${r},${g},${b}`;
+
+      histogram.set(key, (histogram.get(key) || 0) + 1);
+    }
+
+    const topColors = Array.from(histogram.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([key, count]) => {
+        const [r, g, b] = key.split(',').map(Number);
+        return { rgb: { r, g, b }, count };
+      });
+
+    if (topColors.length === 0) {
+      return null;
+    }
+
+    return {
+      uniqueColors: histogram.size,
+      count: topColors[0].count,
+      topColors,
+    };
+  }
+
   function drawHistogram(context, width, height) {
-    if (!context || !sourceCanvas) {
+    if (!context) {
       return;
     }
 
-    const info = sourceCanvas.__screenMaskInfo;
+    let info = sourceCanvas ? sourceCanvas.__screenMaskInfo : null;
+    if (!info || !Array.isArray(info.topColors) || info.topColors.length === 0) {
+      info = buildHistogramInfoFromCanvas(captureCanvas);
+    }
+
     context.clearRect(0, 0, width, height);
     context.fillStyle = '#111';
     context.fillRect(0, 0, width, height);
