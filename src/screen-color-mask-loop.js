@@ -1,6 +1,12 @@
 (() => {
   const TARGET_FPS = 15;
   const FRAME_INTERVAL_MS = Math.round(1000 / TARGET_FPS);
+  const COLOR_QUANTIZATION = 8;
+  const MAX_COLOR_DISTANCE = 24;
+
+  function quantizeChannel(value) {
+    return Math.floor(value / COLOR_QUANTIZATION) * COLOR_QUANTIZATION;
+  }
 
   function getTopColors(histogram, limit) {
     return Array.from(histogram.entries())
@@ -22,9 +28,9 @@
     let bestCount = 0;
 
     for (let i = 0; i < rgba.length; i += 4) {
-      const r = rgba[i];
-      const g = rgba[i + 1];
-      const b = rgba[i + 2];
+      const r = quantizeChannel(rgba[i]);
+      const g = quantizeChannel(rgba[i + 1]);
+      const b = quantizeChannel(rgba[i + 2]);
       const key = `${r},${g},${b}`;
       const count = (histogram.get(key) || 0) + 1;
 
@@ -48,13 +54,24 @@
 
   function buildColorMask(sourceRgba, width, height, dominant) {
     const maskRgba = new Uint8ClampedArray(sourceRgba.length);
+    let matches = 0;
 
     for (let i = 0; i < sourceRgba.length; i += 4) {
-      const isMatch =
-        sourceRgba[i] === dominant.r &&
-        sourceRgba[i + 1] === dominant.g &&
-        sourceRgba[i + 2] === dominant.b;
+      const r = sourceRgba[i];
+      const g = sourceRgba[i + 1];
+      const b = sourceRgba[i + 2];
+
+      const quantizedMatch =
+        quantizeChannel(r) === dominant.r &&
+        quantizeChannel(g) === dominant.g &&
+        quantizeChannel(b) === dominant.b;
+      const manhattanDistance =
+        Math.abs(r - dominant.r) + Math.abs(g - dominant.g) + Math.abs(b - dominant.b);
+      const isMatch = quantizedMatch || manhattanDistance <= MAX_COLOR_DISTANCE;
       const alpha = isMatch ? 255 : 0;
+      if (isMatch) {
+        matches += 1;
+      }
 
       maskRgba[i] = 255;
       maskRgba[i + 1] = 255;
@@ -62,7 +79,24 @@
       maskRgba[i + 3] = alpha;
     }
 
-    return new ImageData(maskRgba, width, height);
+    // If the frame is very noisy and yielded no matches, keep a minimal mask
+    // by selecting the closest color per pixel.
+    if (matches === 0) {
+      for (let i = 0; i < sourceRgba.length; i += 4) {
+        const r = sourceRgba[i];
+        const g = sourceRgba[i + 1];
+        const b = sourceRgba[i + 2];
+        const manhattanDistance =
+          Math.abs(r - dominant.r) + Math.abs(g - dominant.g) + Math.abs(b - dominant.b);
+        maskRgba[i + 3] = manhattanDistance <= MAX_COLOR_DISTANCE * 2 ? 255 : 0;
+      }
+    }
+
+    return {
+      imageData: new ImageData(maskRgba, width, height),
+      matches,
+      totalPixels: sourceRgba.length / 4,
+    };
   }
 
   function applyMaskFrame(sourceCanvas, targetCanvas, maskOutputCanvas) {
@@ -103,7 +137,7 @@
       throw new Error('Failed to create mask 2D context.');
     }
 
-    maskCtx.putImageData(mask, 0, 0);
+    maskCtx.putImageData(mask.imageData, 0, 0);
 
     if (maskOutputCanvas) {
       const maskOutputCtx = maskOutputCanvas.getContext('2d');
@@ -133,6 +167,8 @@
       count: dominantInfo.count,
       uniqueColors: dominantInfo.uniqueColors,
       topColors: dominantInfo.topColors,
+      maskPixels: mask.matches,
+      maskCoverage: mask.totalPixels > 0 ? mask.matches / mask.totalPixels : 0,
     };
 
     // Keep debug data available regardless of which canvas the runtime reads from.
